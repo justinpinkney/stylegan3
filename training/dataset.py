@@ -87,8 +87,8 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         image = self._load_raw_image(self._raw_idx[idx])
         assert isinstance(image, np.ndarray)
-        assert list(image.shape) == self.image_shape
-        assert image.dtype == np.uint8
+        # assert list(image.shape) == self.image_shape
+        # assert image.dtype == np.uint8
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
@@ -236,3 +236,21 @@ class ImageFolderDataset(Dataset):
         return labels
 
 #----------------------------------------------------------------------------
+
+class CoordImageDataset(ImageFolderDataset):
+    """Appends co-ordinate channels to a randomly cropped image"""
+    def __init__(self, path, resolution=None, **super_kwargs):
+        super().__init__(path, resolution=resolution, **super_kwargs)
+
+    def _load_raw_image(self, raw_idx):
+        """Concat co-ordinates to the image
+
+        post processing will do (x/127.5)-1 
+        so make sure co-ords are scaled in 0-255 range
+        """
+        im = super()._load_raw_image(raw_idx)
+        im = im.astype(np.float32)
+        h_vec = np.linspace(0, 255, im.shape[1])
+        w_vec = np.linspace(0, 255, im.shape[2])
+        grid_h, grid_w = np.meshgrid(h_vec, w_vec)
+        return np.concatenate((im, grid_h[np.newaxis,...], grid_w[np.newaxis,...]), axis=0)

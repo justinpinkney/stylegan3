@@ -173,6 +173,7 @@ class SynthesisInput(torch.nn.Module):
         size,           # Output spatial size: int or [width, height].
         sampling_rate,  # Output sampling rate.
         bandwidth,      # Output bandwidth.
+        return_grid=False,
     ):
         super().__init__()
         self.w_dim = w_dim
@@ -194,6 +195,7 @@ class SynthesisInput(torch.nn.Module):
         self.register_buffer('transform', torch.eye(3, 3)) # User-specified inverse transform wrt. resulting image.
         self.register_buffer('freqs', freqs)
         self.register_buffer('phases', phases)
+        self.return_grid = return_grid
 
     def forward(self, w):
         # Introduce batch dimension.
@@ -230,6 +232,7 @@ class SynthesisInput(torch.nn.Module):
         # Compute Fourier features.
         x = (grids.unsqueeze(3) @ freqs.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)).squeeze(3) # [batch, height, width, channel]
         x = x + phases.unsqueeze(1).unsqueeze(2)
+        output_grid = transforms
         x = torch.sin(x * (np.pi * 2))
         x = x * amplitudes.unsqueeze(1).unsqueeze(2)
 
@@ -240,7 +243,10 @@ class SynthesisInput(torch.nn.Module):
         # Ensure correct shape.
         x = x.permute(0, 3, 1, 2) # [batch, channel, height, width]
         misc.assert_shape(x, [w.shape[0], self.channels, int(self.size[1]), int(self.size[0])])
-        return x
+        if self.return_grid:
+            return x, output_grid
+        else:
+            return x
 
     def extra_repr(self):
         return '\n'.join([
