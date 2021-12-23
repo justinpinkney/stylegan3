@@ -88,7 +88,7 @@ class Dataset(torch.utils.data.Dataset):
         image = self._load_raw_image(self._raw_idx[idx])
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
-        assert image.dtype == np.uint8
+        # assert image.dtype == np.uint8
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
@@ -235,4 +235,29 @@ class ImageFolderDataset(Dataset):
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
         return labels
 
+#----------------------------------------------------------------------------
+
+class NpArrayDataset(Dataset):
+    def __init__(self,
+        path,                   # numpy array or path to
+        resolution=None, # Not used
+        **super_kwargs,         # Additional arguments for the Dataset base class.
+    ):
+        self._path = path
+        self._data = np.load(path)
+        
+        name = os.path.splitext(os.path.basename(self._path))[0]
+        raw_shape = self._data.shape
+        super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
+
+    @staticmethod
+    def _file_ext(fname):
+        return os.path.splitext(fname)[1].lower()
+
+    def _load_raw_image(self, raw_idx):
+        image = self._data[raw_idx, ...].copy()
+        return image
+
+    def _load_raw_labels(self):
+        return None
 #----------------------------------------------------------------------------
