@@ -10,6 +10,7 @@
 "Analyzing and Improving the Image Quality of StyleGAN".
 Matches the original implementation of configs E-F by Karras et al. at
 https://github.com/NVlabs/stylegan2/blob/master/training/networks_stylegan2.py"""
+import collections
 
 import numpy as np
 import torch
@@ -516,9 +517,15 @@ class SynthesisNetwork(torch.nn.Module):
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
 
+        self.block_dims = self.get_style_space_mapping()
+
     def forward(self, ws, **block_kwargs):
+        """In the case of a style space network we expect the ws to be input as a dense S vector
+        To forward this through the newtork we need to split into a list of lists of tensors for 
+        the S vector for each layer.
+        """
         if self.style_space:
-            block_ws = ws
+            block_ws = self.split_style_space(ws)
         else:
             block_ws = []
             with torch.autograd.profiler.record_function('split_ws'):
@@ -535,6 +542,33 @@ class SynthesisNetwork(torch.nn.Module):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
         return img
+
+    def split_style_space(self, s):
+        """Split a flat S vector into a list of lists
+        List of Blocks with lists of layers each with a S tensor for that layer
+        """
+        # TODO assert we have the correct shape
+        idx = 0
+        s_per_layer = []
+        for synth_block_dims in self.block_dims.values():
+            layer_dims = []
+            for d in synth_block_dims.values():
+                this_s = s[:, idx:idx+d]
+                idx += d
+                layer_dims.append(this_s)
+            s_per_layer.append(layer_dims)
+
+        return s_per_layer
+
+    def get_style_space_mapping(self):
+        block_dims = collections.OrderedDict()
+        for block_name, block in self.named_children():
+            block_dims[block_name] = collections.OrderedDict()
+            for layer_name, layer in block.named_children():
+                if layer._orig_class_name in ("SynthesisLayer", "ToRGBLayer"):
+                    block_dims[block_name][layer_name] = layer.affine.out_features
+        return block_dims
+
 
     def extra_repr(self):
         return ' '.join([
