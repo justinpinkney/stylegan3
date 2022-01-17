@@ -174,6 +174,8 @@ class SynthesisInput(torch.nn.Module):
         sampling_rate,  # Output sampling rate.
         bandwidth,      # Output bandwidth.
         return_grid=False,
+        rotation=True,
+        with_affine=True,
     ):
         super().__init__()
         self.w_dim = w_dim
@@ -181,6 +183,7 @@ class SynthesisInput(torch.nn.Module):
         self.size = np.broadcast_to(np.asarray(size), [2])
         self.sampling_rate = sampling_rate
         self.bandwidth = bandwidth
+        self.with_affine = with_affine
 
         # Draw random frequencies from uniform 2D disc.
         freqs = torch.randn([self.channels, 2])
@@ -191,11 +194,13 @@ class SynthesisInput(torch.nn.Module):
 
         # Setup parameters and buffers.
         self.weight = torch.nn.Parameter(torch.randn([self.channels, self.channels]))
-        self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0])
+        if self.with_affine:
+            self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0])
         self.register_buffer('transform', torch.eye(3, 3)) # User-specified inverse transform wrt. resulting image.
         self.register_buffer('freqs', freqs)
         self.register_buffer('phases', phases)
         self.return_grid = return_grid
+        self.rotation = rotation
 
     def forward(self, w):
         # Introduce batch dimension.
@@ -204,13 +209,18 @@ class SynthesisInput(torch.nn.Module):
         phases = self.phases.unsqueeze(0) # [batch, channel]
 
         # Apply learned transformation.
-        t = self.affine(w) # t = (r_c, r_s, t_x, t_y)
-        t = t / t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
+        if self.with_affine:
+            t = self.affine(w) # t = (r_c, r_s, t_x, t_y)
+            t = t / t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
+        else:
+            t = torch.tensor([0, 0, 0, 0], device=w.device).unsqueeze(0).repeat([w.shape[0], 1])
+
         m_r = torch.eye(3, device=w.device).unsqueeze(0).repeat([w.shape[0], 1, 1]) # Inverse rotation wrt. resulting image.
-        m_r[:, 0, 0] = t[:, 0]  # r'_c
-        m_r[:, 0, 1] = -t[:, 1] # r'_s
-        m_r[:, 1, 0] = t[:, 1]  # r'_s
-        m_r[:, 1, 1] = t[:, 0]  # r'_c
+        if self.rotation:
+            m_r[:, 0, 0] = t[:, 0]  # r'_c
+            m_r[:, 0, 1] = -t[:, 1] # r'_s
+            m_r[:, 1, 0] = t[:, 1]  # r'_s
+            m_r[:, 1, 1] = t[:, 0]  # r'_c
         m_t = torch.eye(3, device=w.device).unsqueeze(0).repeat([w.shape[0], 1, 1]) # Inverse translation wrt. resulting image.
         m_t[:, 0, 2] = -t[:, 2] # t'_x
         m_t[:, 1, 2] = -t[:, 3] # t'_y
@@ -232,7 +242,6 @@ class SynthesisInput(torch.nn.Module):
         # Compute Fourier features.
         x = (grids.unsqueeze(3) @ freqs.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)).squeeze(3) # [batch, height, width, channel]
         x = x + phases.unsqueeze(1).unsqueeze(2)
-        output_grid = transforms
         x = torch.sin(x * (np.pi * 2))
         x = x * amplitudes.unsqueeze(1).unsqueeze(2)
 
@@ -244,6 +253,8 @@ class SynthesisInput(torch.nn.Module):
         x = x.permute(0, 3, 1, 2) # [batch, channel, height, width]
         misc.assert_shape(x, [w.shape[0], self.channels, int(self.size[1]), int(self.size[0])])
         if self.return_grid:
+            theta_transformed = theta @ transforms
+            output_grid = torch.nn.functional.affine_grid(theta_transformed, [theta_transformed.shape[0], 1, self.size[1], self.size[0]], align_corners=False)
             return x, output_grid
         else:
             return x
