@@ -15,6 +15,7 @@ import PIL.Image
 import json
 import torch
 import dnnlib
+import skimage
 
 try:
     import pyspng
@@ -238,19 +239,81 @@ class ImageFolderDataset(Dataset):
 #----------------------------------------------------------------------------
 
 class CoordImageDataset(ImageFolderDataset):
-    """Appends co-ordinate channels to a randomly cropped image"""
-    def __init__(self, path, resolution=None, **super_kwargs):
+    """Randomly scales and crops images and returns parameters as labels"""
+    def __init__(self, path, resolution=None, t_range=(0,0.25), s_range=(1,2), **super_kwargs):
+
+        # TODO stop inheriting from image folder as it's not that helpful
+
+        self._path = path
+        self._zipfile = None
+
+        if os.path.isdir(self._path):
+            self._type = 'dir'
+            self._all_fnames = {os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files}
+        elif self._file_ext(self._path) == '.zip':
+            self._type = 'zip'
+            self._all_fnames = set(self._get_zipfile().namelist())
+        else:
+            raise IOError('Path must point to a directory or zip')
+
+        PIL.Image.init()
+        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        if len(self._image_fnames) == 0:
+            raise IOError('No image files found in the specified path')
+
+        name = os.path.splitext(os.path.basename(self._path))[0]
+        res = np.array(PIL.Image.open(os.path.join(self._path, self._image_fnames[0]))).shape
+        raw_shape = [len(self._image_fnames)] + list(res)
+        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
+            raise IOError('Image files do not match the specified resolution')
+
+        self.t_range = t_range
+        self.s_range = s_range
+        n_ims = len(self._image_fnames)
+        s = (s_range[1] - s_range[0])*np.random.rand(n_ims, 1) + s_range[0]
+        possible_t = 1/2 - 1/2/s
+        t = 2*np.random.rand(n_ims, 2) - 1
+        t *= possible_t
+        #TODO should I set a bunch to be scale 1?
+        self.labels = np.concatenate((np.zeros_like(s), t, s), axis=1, dtype=np.float32)
+
+
         super().__init__(path, resolution=resolution, **super_kwargs)
+        
+
 
     def _load_raw_image(self, raw_idx):
-        """Concat co-ordinates to the image
-
-        post processing will do (x/127.5)-1 
-        so make sure co-ords are scaled in 0-255 range
+        """Load the image and apply translation and scaling
         """
         im = super()._load_raw_image(raw_idx)
         im = im.astype(np.float32)
-        h_vec = np.linspace(0, 255, im.shape[1])
-        w_vec = np.linspace(0, 255, im.shape[2])
-        grid_h, grid_w = np.meshgrid(h_vec, w_vec)
-        return np.concatenate((im, grid_h[np.newaxis,...], grid_w[np.newaxis,...]), axis=0)
+        transform = self.labels[raw_idx]
+        transformed_im = self.transform_im(im, transform)
+        return transformed_im
+
+    def _load_raw_labels(self):
+        """Return the transformation parameters as labels
+        
+        Expects to be able to retrieve all the labels so for the moment just
+        generate a fixed set (though would be better to randomly change these)
+    
+        labels as (rot, t_x, t_y, s)
+        """
+        return self.labels
+
+    def transform_im(self, im, tform):
+        im_dim = im.shape[1]
+
+        scale = tform[3]
+        translation = tform[1:3]*im_dim*scale
+        mat = (
+            skimage.transform.SimilarityTransform(
+                translation=(-im_dim//2+translation[0],-im_dim//2+translation[1])) +
+            skimage.transform.SimilarityTransform(
+                scale=1/scale) +
+            skimage.transform.SimilarityTransform(
+                translation=(im_dim//2,im_dim//2))
+        )
+        warped = skimage.transform.warp(im.transpose(1,2,0), mat)
+        warped = warped.transpose(2, 0, 1) # HWC => CHW
+        return warped

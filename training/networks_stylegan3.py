@@ -194,15 +194,16 @@ class SynthesisInput(torch.nn.Module):
 
         # Setup parameters and buffers.
         self.weight = torch.nn.Parameter(torch.randn([self.channels, self.channels]))
-        if self.with_affine:
-            self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0])
+        # if self.with_affine:
+        self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0])
         self.register_buffer('transform', torch.eye(3, 3)) # User-specified inverse transform wrt. resulting image.
         self.register_buffer('freqs', freqs)
         self.register_buffer('phases', phases)
         self.return_grid = return_grid
         self.rotation = rotation
 
-    def forward(self, w):
+    def forward(self, w, c=None):
+        # c = (rotation, t_x, t_y, scale) remember inverse transform
         # Introduce batch dimension.
         transforms = self.transform.unsqueeze(0) # [batch, row, col]
         freqs = self.freqs.unsqueeze(0) # [batch, channel, xy]
@@ -213,7 +214,17 @@ class SynthesisInput(torch.nn.Module):
             t = self.affine(w) # t = (r_c, r_s, t_x, t_y)
             t = t / t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
         else:
-            t = torch.tensor([0, 0, 0, 0], device=w.device).unsqueeze(0).repeat([w.shape[0], 1])
+            t = torch.tensor([1, 0, 0, 0], device=w.device).unsqueeze(0).repeat([w.shape[0], 1])
+        
+        if c is not None:
+            c_rot = c[:,0]
+            c_tx = c[:,1]
+            c_ty = c[:,2]
+            c_scale = c[:,3]
+            new_r_c = torch.cos(torch.acos(t[:,0]) + c_rot)
+            new_r_s = torch.sin(torch.asin(t[:,1]) + c_rot)
+            t = torch.cat((new_r_c.unsqueeze(1), new_r_s.unsqueeze(1), (t[:,2]+c_tx).unsqueeze(1), (t[:,3]+c_ty).unsqueeze(1)), dim=1)
+            t[:,:2] /= t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
 
         m_r = torch.eye(3, device=w.device).unsqueeze(0).repeat([w.shape[0], 1, 1]) # Inverse rotation wrt. resulting image.
         if self.rotation:
@@ -237,7 +248,10 @@ class SynthesisInput(torch.nn.Module):
         theta = torch.eye(2, 3, device=w.device)
         theta[0, 0] = 0.5 * self.size[0] / self.sampling_rate
         theta[1, 1] = 0.5 * self.size[1] / self.sampling_rate
-        grids = torch.nn.functional.affine_grid(theta.unsqueeze(0), [1, 1, self.size[1], self.size[0]], align_corners=False)
+        if c is not None:
+            theta = theta*c_scale[..., None]
+        theta = theta.unsqueeze(0)
+        grids = torch.nn.functional.affine_grid(theta, [theta.shape[0], 1, self.size[1], self.size[0]], align_corners=False)
 
         # Compute Fourier features.
         x = (grids.unsqueeze(3) @ freqs.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)).squeeze(3) # [batch, height, width, channel]
@@ -428,6 +442,7 @@ class SynthesisNetwork(torch.nn.Module):
         margin_size         = 10,       # Number of additional pixels outside the image.
         output_scale        = 0.25,     # Scale factor for the output image.
         num_fp16_res        = 4,        # Use FP16 for the N highest resolutions.
+        c_transform = None,
         **layer_kwargs,                 # Arguments for SynthesisLayer.
     ):
         super().__init__()
@@ -457,9 +472,14 @@ class SynthesisNetwork(torch.nn.Module):
         channels[-1] = self.img_channels
 
         # Construct layers.
-        self.input = SynthesisInput(
-            w_dim=self.w_dim, channels=int(channels[0]), size=int(sizes[0]),
-            sampling_rate=sampling_rates[0], bandwidth=cutoffs[0])
+        if c_transform is None:
+            self.input = SynthesisInput(
+                w_dim=self.w_dim, channels=int(channels[0]), size=int(sizes[0]),
+                sampling_rate=sampling_rates[0], bandwidth=cutoffs[0])
+        else:
+            self.input = SynthesisInput(
+                w_dim=self.w_dim, channels=int(channels[0]), size=int(sizes[0]),
+                sampling_rate=sampling_rates[0], bandwidth=cutoffs[0], c=c_transform)
         self.layer_names = []
         for idx in range(self.num_layers + 1):
             prev = max(idx - 1, 0)
@@ -478,12 +498,15 @@ class SynthesisNetwork(torch.nn.Module):
             setattr(self, name, layer)
             self.layer_names.append(name)
 
-    def forward(self, ws, **layer_kwargs):
+    def forward(self, ws, c_transform=None, **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
         ws = ws.to(torch.float32).unbind(dim=1)
 
         # Execute layers.
-        x = self.input(ws[0])
+        if c_transform is None:
+            x = self.input(ws[0])
+        else:
+            x = self.input(ws[0], c_transform)
         for name, w in zip(self.layer_names, ws[1:]):
             x = getattr(self, name)(x, w, **layer_kwargs)
         if self.output_scale != 1:
@@ -512,6 +535,7 @@ class Generator(torch.nn.Module):
         img_resolution,             # Output resolution.
         img_channels,               # Number of output color channels.
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
+        c_is_transform=False,
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
         super().__init__()
@@ -522,11 +546,19 @@ class Generator(torch.nn.Module):
         self.img_channels = img_channels
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        self.c_is_transform = c_is_transform
+        if c_is_transform:
+            c_mapping = 0
+        else:
+            c_mapping = c_dim
+        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_mapping, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
     def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
-        ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
-        img = self.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        if self.c_is_transform:
+            ws = self.mapping(z, z, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        else:
+            ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        img = self.synthesis(ws, update_emas=update_emas, **synthesis_kwargs, c_transform=c)
         return img
 
 #----------------------------------------------------------------------------
