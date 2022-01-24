@@ -220,10 +220,10 @@ class SynthesisInput(torch.nn.Module):
             c_rot = c[:,0]
             c_tx = c[:,1]
             c_ty = c[:,2]
-            c_scale = c[:,3]
+            c_scale = 1/c[:,3]
             new_r_c = torch.cos(torch.acos(t[:,0]) + c_rot)
             new_r_s = torch.sin(torch.asin(t[:,1]) + c_rot)
-            t = torch.cat((new_r_c.unsqueeze(1), new_r_s.unsqueeze(1), (t[:,2]+c_tx).unsqueeze(1), (t[:,3]+c_ty).unsqueeze(1)), dim=1)
+            t = torch.cat((new_r_c.unsqueeze(1), new_r_s.unsqueeze(1), (t[:,2]-c_tx).unsqueeze(1), (t[:,3]-c_ty).unsqueeze(1)), dim=1)
             t[:,:2] /= t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
 
         m_r = torch.eye(3, device=w.device).unsqueeze(0).repeat([w.shape[0], 1, 1]) # Inverse rotation wrt. resulting image.
