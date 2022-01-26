@@ -264,8 +264,6 @@ class CoordImageDataset(ImageFolderDataset):
         name = os.path.splitext(os.path.basename(self._path))[0]
         res = np.array(PIL.Image.open(os.path.join(self._path, self._image_fnames[0]))).shape
         raw_shape = [len(self._image_fnames)] + list(res)
-        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
-            raise IOError('Image files do not match the specified resolution')
 
         self.t_range = t_range
         self.s_range = s_range

@@ -221,10 +221,16 @@ class SynthesisInput(torch.nn.Module):
             c_tx = c[:,1]
             c_ty = c[:,2]
             c_scale = 1/c[:,3]
-            new_r_c = torch.cos(torch.acos(t[:,0]) + c_rot)
-            new_r_s = torch.sin(torch.asin(t[:,1]) + c_rot)
-            t = torch.cat((new_r_c.unsqueeze(1), new_r_s.unsqueeze(1), (t[:,2]-c_tx).unsqueeze(1), (t[:,3]-c_ty).unsqueeze(1)), dim=1)
-            t[:,:2] /= t[:, :2].norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
+
+            cc = torch.cos(c_rot)
+            sc = torch.sin(c_rot)
+            # st = torch.sin(t[:,0])
+            new_r_c = t[:,0]*cc - t[:,1]*sc
+            new_r_s = t[:,1]*cc + t[:,0]*sc
+            rot_component = torch.cat((new_r_c.unsqueeze(1), new_r_s.unsqueeze(1)), dim=1)
+            other_components =  torch.cat(((t[:,2]-c_tx).unsqueeze(1), (t[:,3]-c_ty).unsqueeze(1)), dim=1)
+            rot_component_norm = rot_component/rot_component.norm(dim=1, keepdim=True) # t' = (r'_c, r'_s, t'_x, t'_y)
+            t = torch.cat((rot_component_norm, other_components), dim=1)
 
         m_r = torch.eye(3, device=w.device).unsqueeze(0).repeat([w.shape[0], 1, 1]) # Inverse rotation wrt. resulting image.
         if self.rotation:
@@ -248,9 +254,9 @@ class SynthesisInput(torch.nn.Module):
         theta = torch.eye(2, 3, device=w.device)
         theta[0, 0] = 0.5 * self.size[0] / self.sampling_rate
         theta[1, 1] = 0.5 * self.size[1] / self.sampling_rate
+        theta = theta.unsqueeze(0).repeat([w.shape[0], 1, 1])
         if c is not None:
-            theta = theta*c_scale[..., None]
-        theta = theta.unsqueeze(0)
+            theta = theta*c_scale[..., None, None]
         grids = torch.nn.functional.affine_grid(theta, [theta.shape[0], 1, self.size[1], self.size[0]], align_corners=False)
 
         # Compute Fourier features.

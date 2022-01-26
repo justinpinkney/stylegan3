@@ -46,7 +46,7 @@ class StyleGAN2Loss(Loss):
                 cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                 cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
-        img = self.G.synthesis(ws, update_emas=update_emas)
+        img = self.G.synthesis(ws, update_emas=update_emas, c_transform=c)
         return img, ws
 
     def run_D(self, img, c, blur_sigma=0, update_emas=False):
