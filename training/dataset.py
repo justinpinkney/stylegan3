@@ -268,7 +268,9 @@ class CoordImageDataset(ImageFolderDataset):
         self.t_range = t_range
         self.s_range = s_range
         n_ims = len(self._image_fnames)
-        s = (s_range[1] - s_range[0])*np.random.rand(n_ims, 1) + s_range[0]
+        # s = (s_range[1] - s_range[0])*np.random.rand(n_ims, 1) + s_range[0]
+        a = b = 0.1
+        s = (s_range[1] - s_range[0])*np.random.beta(a, b, (n_ims, 1)) + s_range[0]
         possible_t = 1/2 - 1/2/s
         t = 2*np.random.rand(n_ims, 2) - 1
         t *= possible_t
@@ -313,5 +315,6 @@ class CoordImageDataset(ImageFolderDataset):
                 translation=(im_dim//2,im_dim//2))
         )
         warped = skimage.transform.warp(im.transpose(1,2,0), mat)
+        warped = skimage.transform.resize(warped, (256, 256), anti_aliasing=True)
         warped = warped.transpose(2, 0, 1) # HWC => CHW
         return warped
